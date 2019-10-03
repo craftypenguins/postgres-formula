@@ -15,7 +15,7 @@ include:
 # Install PostgreSQL client and libraries
 postgresql-client-libs:
   pkg.installed:
-    - pkgs: {{ pkgs }}
+    - pkgs: {{ pkgs | json }}
   {%- if postgres.use_upstream_repo == true %}
     - refresh: True
     - require:
@@ -39,6 +39,11 @@ postgresql-{{ bin }}-altinstall:
     - onlyif: test -f {{ path }}
     - require:
       - pkg: postgresql-client-libs
+      {%- if grains['saltversioninfo'] < [2018, 11, 0, 0] %}
+    - retry:
+        attempts: 2
+        until: True
+      {%- endif %}
 
     {%- endfor %}
 {%- endif %}

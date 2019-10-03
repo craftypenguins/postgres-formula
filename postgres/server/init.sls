@@ -17,7 +17,7 @@ include:
 # Install, configure and start PostgreSQL server
 postgresql-server:
   pkg.installed:
-    - pkgs: {{ pkgs }}
+    - pkgs: {{ pkgs | json }}
 {%- if postgres.use_upstream_repo == true %}
     - refresh: True
     - require:
@@ -31,8 +31,8 @@ postgresql-server:
     - require_in:
       - file: postgresql-server
   file.managed:
-    - name: /Library/LaunchAgents/{{ postgres.service }}.plist
-    - source: /usr/local/opt/postgres/{{ postgres.service }}.plist
+    - name: /Library/LaunchAgents/{{ postgres.service.name }}.plist
+    - source: /usr/local/opt/postgres/{{ postgres.service.name }}.plist
     - group: wheel
     - require_in:
       - service: postgresql-running
@@ -54,6 +54,11 @@ postgresql-{{ bin }}-altinstall:
       - pkg: postgresql-server
     - require_in:
       - cmd: postgresql-cluster-prepared
+        {%- if grains['saltversioninfo'] < [2018, 11, 0, 0] %}
+    - retry:
+        attempts: 2
+        until: True
+        {%- endif %}
 
       {%- endfor %}
   {%- endif %}
@@ -84,7 +89,7 @@ postgresql-cluster-prepared:
       - pkg: postgresql-server
       - file: postgresql-cluster-prepared
     - watch_in:
-      - module: postgresql-service-restart
+      - service: postgresql-running
 {%- endif %}
 
 postgresql-config-dir:
@@ -143,16 +148,9 @@ postgresql-conf:
       - file: postgresql-conf-comment-port
       {%- endif %}
     - watch_in:
-      - module: postgresql-service-restart
+      - service: postgresql-running
 
 {%- endif %}
-
-# Restart the service where reloading is not sufficient
-# Currently when the cluster is created or changes made to `postgresql.conf`
-postgresql-service-restart:
-  module.wait:
-    - name: service.restart
-    - m_name: {{ postgres.service }}
 
 {%- set pg_hba_path = salt['file.join'](postgres.conf_dir, 'pg_hba.conf') %}
 
@@ -180,6 +178,8 @@ postgresql-pg_hba:
 {%- endif %}
     - require:
       - file: postgresql-config-dir
+    - watch_in:
+      - service: postgresql-running
 
 {%- set pg_ident_path = salt['file.join'](postgres.conf_dir, 'pg_ident.conf') %}
 
@@ -207,6 +207,17 @@ postgresql-pg_ident:
 {%- endif %}
     - require:
       - file: postgresql-config-dir
+      {%- if postgres.prepare_cluster.run %}
+      - cmd: postgresql-cluster-prepared
+      {%- else %}
+      - file: postgresql-cluster-prepared
+      {%- endif %}
+    - watch_in:
+      {%- if grains.os not in ('MacOS',) %}
+      - module: postgresql-service-reload
+      {%- else %}
+      - service: postgresql-running
+      {%- endif %}
 
 {%- for name, tblspace in postgres.tablespaces|dictsort() %}
 
@@ -250,16 +261,34 @@ postgresql-tablespace-dir-{{ name }}-fcontext:
 
 {%- if not postgres.bake_image %}
 
+# Workaround for FreeBSD minion undefinitely hanging on service start
+# cf. https://github.com/saltstack/salt/issues/44848
+{% if postgres.service.sysrc %}
+posgresql-rc-flags:
+  sysrc.managed:
+    - name: {{ postgres.service.name }}_flags
+    - value: "{{ postgres.service.flags }} > /dev/null 2>&1"
+    - watch_in:
+      - service: postgresql-running
+{% endif %}
+
 # Start PostgreSQL server using OS init
+# Note: This is also the target for numerous `watch_in` requisites above, used
+# for the necessary service restart after changing the relevant configuration files
 postgresql-running:
   service.running:
-    - name: {{ postgres.service }}
+    - name: {{ postgres.service.name }}
     - enable: True
-   {% if grains.os not in ('MacOS',) %}
-    - reload: True
-   {% endif %}
-    - watch:
-      - file: postgresql-pg_hba
-      - file: postgresql-pg_ident
+
+# Reload the service for changes made to `pg_ident.conf`, except for `MacOS`
+# which is handled by `postgresql-running` above.
+{%- if grains.os not in ('MacOS',) %}
+postgresql-service-reload:
+  module.wait:
+    - name: service.reload
+    - m_name: {{ postgres.service.name }}
+    - require:
+      - service: postgresql-running
+{%- endif %}
 
 {%- endif %}
